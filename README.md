@@ -1,67 +1,144 @@
-# Payload Blank Template
+# Field Hooks in Lexical Reproduction
 
-This template comes configured with the bare minimum to get started on anything you need.
+This repository demonstrates a bug in PayloadCMS where **field hooks do not fire for relationship fields embedded in blocks within Lexical rich text fields**.
 
-## Quick start
+## The Bug
 
-This template can be deployed directly from our Cloud hosting and it will setup MongoDB and cloud S3 object storage for media.
+When a relationship field is defined within a block that is then embedded in a Lexical rich text field, most field hooks fail to execute during create/update operations.
 
-## Quick Start - local setup
+### Expected Behavior
 
-To spin up this template locally, follow these steps:
+All field hooks should fire for relationship fields regardless of where they are defined:
 
-### Clone
+- `beforeValidate`
+- `beforeChange`
+- `afterChange`
+- `afterRead`
+- `beforeDuplicate`
 
-After you click the `Deploy` button above, you'll want to have standalone copy of this repo on your machine. If you've already cloned this repo, skip to [Development](#development).
+### Actual Behavior
 
-### Development
+For relationship fields in blocks embedded in Lexical fields:
 
-1. First [clone the repo](#clone) if you have not done so already
-2. `cd my-project && cp .env.example .env` to copy the example environment variables. You'll need to add the `MONGODB_URI` from your Cloud project to your `.env` if you want to use S3 storage and the MongoDB database that was created for you.
+- ✗ `beforeValidate` - **does NOT fire**
+- ✗ `beforeChange` - **does NOT fire**
+- ✗ `afterChange` - **does NOT fire**
+- ✓ `afterRead` - **fires correctly**
+- ✗ `beforeDuplicate` - **does NOT fire**
 
-3. `pnpm install && pnpm dev` to install dependencies and start the dev server
-4. open `http://localhost:3000` to open the app in your browser
+## Impact
 
-That's it! Changes made in `./src` will be reflected in your app. Follow the on-screen instructions to login and create your first admin user. Then check out [Production](#production) once you're ready to build and serve your app, and [Deployment](#deployment) when you're ready to go live.
+This bug prevents:
 
-#### Docker (Optional)
+1. **Field validation** from running (potential data integrity issues)
+2. **Data transformation** in `beforeChange` (data won't be normalized/sanitized)
+3. **Side effects** in `afterChange` (no notifications, derived data updates, etc.)
+4. **Duplication logic** in `beforeDuplicate` (data won't be prepared correctly when duplicating entries)
 
-If you prefer to use Docker for local development instead of a local MongoDB instance, the provided docker-compose.yml file can be used.
-
-To do so, follow these steps:
-
-- Modify the `MONGODB_URI` in your `.env` file to `mongodb://127.0.0.1/<dbname>`
-- Modify the `docker-compose.yml` file's `MONGODB_URI` to match the above `<dbname>`
-- Run `docker-compose up` to start the database, optionally pass `-d` to run in the background.
-
-## How it works
-
-The Payload config is tailored specifically to the needs of most websites. It is pre-configured in the following ways:
+## Repository Structure
 
 ### Collections
 
-See the [Collections](https://payloadcms.com/docs/configuration/collections) docs for details on how to extend this functionality.
+- **Categories** - Simple collection used as the target for relationship fields
+- **Posts** - Collection with a direct relationship field (control test - works correctly)
+- **Articles** - Collection with a Lexical rich text field that embeds blocks (demonstrates the bug)
 
-- #### Users (Authentication)
+### Blocks
 
-  Users are auth-enabled collections that have access to the admin panel.
+- **CategoryBlock** - A block containing a relationship field with hooks defined
 
-  For additional help, see the official [Auth Example](https://github.com/payloadcms/payload/tree/main/examples/auth) or the [Authentication](https://payloadcms.com/docs/authentication/overview#authentication-overview) docs.
+### Tests
 
-- #### Media
+The test suite (`tests/int/field-hooks.int.spec.ts`) demonstrates:
 
-  This is the uploads enabled collection. It features pre-configured sizes, focal point and manual resizing to help you manage your pictures.
+1. **Control Test**: Direct relationship fields fire all hooks correctly
+2. **Bug Test**: Block relationship fields only fire `afterRead` hook
 
-### Docker
+## Setup
 
-Alternatively, you can use [Docker](https://www.docker.com) to spin up this template locally. To do so, follow these steps:
+1. Install dependencies:
 
-1. Follow [steps 1 and 2 from above](#development), the docker-compose file will automatically use the `.env` file in your project root
-1. Next run `docker-compose up`
-1. Follow [steps 4 and 5 from above](#development) to login and create your first admin user
+   ```bash
+   pnpm install
+   ```
 
-That's it! The Docker instance will help you get up and running quickly while also standardizing the development environment across your teams.
+2. Copy environment variables:
 
-## Questions
+   ```bash
+   cp .env.example .env
+   ```
 
-If you have any issues or questions, reach out to us on [Discord](https://discord.com/invite/payload) or start a [GitHub discussion](https://github.com/payloadcms/payload/discussions).
+3. Generate types:
+   ```bash
+   pnpm run generate:types
+   ```
+
+## Running the Tests
+
+Run the integration tests to see the bug in action:
+
+```bash
+pnpm run test:int tests/int/field-hooks.int.spec.ts
+```
+
+### Expected Output
+
+```
+✓ Field Hooks in Lexical Blocks > should fire all hooks for direct relationship fields (control test)
+  Posts.category beforeValidate hook fired
+  Posts.category beforeChange hook fired
+  Posts.category afterChange hook fired
+  Posts.category afterRead hook fired
+
+✗ Field Hooks in Lexical Blocks > should fire all hooks for relationship fields in blocks within Lexical fields (BUG)
+  CategoryBlock.category afterRead hook fired (only this one!)
+
+  Hook call summary for block fields:
+    beforeValidate: called = false
+    beforeChange: called = false
+    afterChange: called = false
+    afterRead: called = true
+
+  Duplicate hook test:
+    beforeDuplicate: called = false
+
+  AssertionError: expected "beforeValidate" to be called at least once
+```
+
+## Technical Details
+
+The hooks are wrapped in objects to allow spy/mock functions to track their invocation:
+
+```typescript
+// Example from CategoryBlock.ts
+export const blockCategoryHooks = {
+  beforeValidate: (value: any) => {
+    console.log('CategoryBlock.category beforeValidate hook fired')
+    return value
+  },
+  beforeChange: (value: any) => {
+    console.log('CategoryBlock.category beforeChange hook fired')
+    return value
+  },
+  // ... etc
+}
+```
+
+Tests use Vitest spies to verify hook execution:
+
+```typescript
+vi.spyOn(blockCategoryHooks, 'beforeValidate')
+vi.spyOn(blockCategoryHooks, 'beforeChange')
+// ... etc
+
+expect(blockCategoryHooks.beforeValidate).toHaveBeenCalled() // FAILS
+expect(blockCategoryHooks.beforeChange).toHaveBeenCalled() // FAILS
+expect(blockCategoryHooks.afterRead).toHaveBeenCalled() // PASSES
+```
+
+## Environment
+
+- PayloadCMS: 3.59.1
+- @payloadcms/richtext-lexical: 3.59.1
+- Node: 18.20.2 / 20.9.0+
+- Database: SQLite (via @payloadcms/db-sqlite)
